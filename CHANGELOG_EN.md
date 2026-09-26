@@ -5,6 +5,26 @@ Russian version: [CHANGELOG.md](CHANGELOG.md).
 Format — [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning — [SemVer](https://semver.org/).
 
+## [1.8.1] — 2026-09-27
+
+**The first module edit after the daemon starts updates the call graph in 0.24 s instead of 5.5 s (cold database of a stock trade configuration, 57k files); on a working installation — 0.39 s instead of 15.5. The graph after a batch matches 1.8.0 row for row.**
+
+### Fixed
+
+- **Call-graph layers were rebuilt by scanning every edge on each `.bsl` edit.** In 1.8.0 the full index on the call kind was replaced by a partial one (`WHERE call_type <> 'direct'`), and SQLite uses a partial index only when the query condition explicitly implies it. Deleting the extension-override, subscription and form-event layers scanned all 614k edges, and inserting overrides scanned all 261k functions. The partial-index condition is now part of the query, and overrides get a partial index `idx_functions_override`: 5.28 → 0.023 s on a cold database, 0.50 → 0.006 s on a warm one.
+- **Batch call resolution built temporary maps over every exported procedure in the database.** It now looks up the name and owner indexes directly: 0.93 → 0.001 s cold, 0.22 → 0.001 s warm. The resolved targets match the full resolution.
+
+### Compatibility
+
+- Data and response formats are unchanged, no reindex is needed; the `idx_functions_override` index is created in place on first start.
+
+### Verification
+
+- `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` — 1016 tests, 0 failed. New tests: layer deletion uses the partial index, override insertion uses the new index, batch resolution matches the full one.
+- Copy of a stock trade configuration (57k files), cold database: first edit — graph 5.5 → 0.24 s; batch of 100 modules — graph 3.2 → 2.3 s; graph after the batch — 614,328 edges, row for row identical to 1.8.0.
+- Working installation: first edit after start — graph 15.5 → 0.39 s, subsequent edits — 0.8 s → 40 to 54 ms.
+- Linux federation node (local build before publishing): startup reconciliation of six 1C databases without errors; statistics, search, callers, object profile and call-graph path through federation — green.
+
 ## [1.8.0] — 2026-09-27
 
 **Faster indexing, same data. On a stock trade configuration (57k files) fresh CLI indexing takes 98.6 s instead of 132.7 (-26 %), a repeat pass with no changes 37.9 s instead of 142.1 (-73 %), a fresh daemon start 113 s instead of 142, and a batch of 100 changed files is visible to search after 128 s instead of 168.5. Databases built by 1.7.0 and 1.8.0 match across all tables. The speed-up and integrity fixes are a contribution by @OniVe (PR #12).**
