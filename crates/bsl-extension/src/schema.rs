@@ -724,6 +724,29 @@ pub fn migrate_extensions(conn: &rusqlite::Connection) -> anyhow::Result<()> {
                WHERE call_type <> 'direct';",
         )?;
     }
+    // Индекс перехватчиков расширений живёт здесь, а не в `SCHEMA_EXTENSIONS`:
+    // тот DDL-батч применяется и на голой in-memory БД тестов, где ядровой
+    // таблицы `functions` ещё нет (как и у блока выше — см. комментарий про
+    // частичную схему). Продовый путь `daemon_core/worker.rs` и `cli.rs` зовёт
+    // `migrate_schema` непосредственно перед `apply_schema_extensions`, так что
+    // индекс на боевой БД появляется при том же открытии.
+    //
+    // Функции, перекрывающие процедуры основной конфигурации (расширения): их
+    // единицы на сотни тысяч функций, а слой `extension_override` графа
+    // пересобирается на каждой правке модуля. Без индекса — просмотр всех
+    // функций (замер: 1,9 с на холодной базе, 0,3 с на горячей). Массовая
+    // загрузка ядра индекс не снимает (удаляет свои индексы по списку имён).
+    let functions_exists: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='functions'",
+        [],
+        |r| r.get(0),
+    )?;
+    if functions_exists > 0 {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_functions_override ON functions(override_target, name) \
+               WHERE override_type IS NOT NULL;",
+        )?;
+    }
     Ok(())
 }
 

@@ -132,15 +132,20 @@ pub(crate) fn update_call_graph_direct_for_file(
     Ok(())
 }
 
+/// Удаление одного не-direct слоя графа (`?2` — `subscription` / `form_event` /
+/// `extension_override`). Условие `call_type <> 'direct'` в запросе обязательно:
+/// частичный индекс `idx_pcg_call_type_nd` SQLite берёт, только если условие
+/// индекса буквально есть в запросе; без него — просмотр всех рёбер графа
+/// (замер на 614 тыс. рёбер: 3,3 с на холодной базе вместо 0,014 с).
+pub(crate) const DELETE_CALL_LAYER_SQL: &str =
+    "DELETE FROM proc_call_graph WHERE repo = ?1 AND call_type = ?2 AND call_type <> 'direct'";
+
 /// Пересобрать слой `subscription` графа вызовов из таблицы
 /// `event_subscriptions`. Идентично subscription-части `build_call_graph`.
 pub(crate) fn rebuild_call_graph_subscription(conn: &rusqlite::Connection) -> Result<()> {
     let _ = conn.execute("ROLLBACK", []);
     conn.execute("BEGIN", [])?;
-    conn.execute(
-        "DELETE FROM proc_call_graph WHERE repo = ? AND call_type = 'subscription'",
-        params![REPO_DEFAULT],
-    )?;
+    conn.execute(DELETE_CALL_LAYER_SQL, params![REPO_DEFAULT, "subscription"])?;
     let n = conn.execute(
         "INSERT OR IGNORE INTO proc_call_graph \
          (repo, caller_proc_key, callee_proc_name, call_type) \
@@ -159,10 +164,7 @@ pub(crate) fn rebuild_call_graph_subscription(conn: &rusqlite::Connection) -> Re
 pub(crate) fn rebuild_call_graph_form_event(conn: &rusqlite::Connection) -> Result<()> {
     let _ = conn.execute("ROLLBACK", []);
     conn.execute("BEGIN", [])?;
-    conn.execute(
-        "DELETE FROM proc_call_graph WHERE repo = ? AND call_type = 'form_event'",
-        params![REPO_DEFAULT],
-    )?;
+    conn.execute(DELETE_CALL_LAYER_SQL, params![REPO_DEFAULT, "form_event"])?;
     let rows: Vec<(String, String, String)> = {
         let mut stmt = conn.prepare(
             "SELECT owner_full_name, form_name, handlers_json \
@@ -210,6 +212,16 @@ pub(crate) fn rebuild_call_graph_form_event(conn: &rusqlite::Connection) -> Resu
     Ok(())
 }
 
+/// Слой `extension_override` из `functions.override_*`. Выборка идёт по частичному
+/// индексу `idx_functions_override` (условие `override_type IS NOT NULL`), а не
+/// просмотром всех функций конфигурации.
+pub(crate) const EXTENSION_OVERRIDE_INSERT_SQL: &str = "INSERT OR IGNORE INTO proc_call_graph \
+     (repo, caller_proc_key, callee_proc_name, call_type) \
+     SELECT ?, f.override_target, f.name, 'extension_override' \
+     FROM functions f \
+     WHERE f.override_type IS NOT NULL AND f.override_target IS NOT NULL \
+       AND f.override_target != '' AND f.name != ''";
+
 /// Построить граф вызовов из заполненных metadata_forms,
 /// event_subscriptions и core-таблицы `calls`. Удаляет старые ребра
 /// этого репо и вставляет свежие — идемпотентно.
@@ -221,18 +233,10 @@ pub(crate) fn rebuild_call_graph_extension_override(conn: &rusqlite::Connection)
     let _ = conn.execute("ROLLBACK", []);
     conn.execute("BEGIN", [])?;
     conn.execute(
-        "DELETE FROM proc_call_graph WHERE repo = ? AND call_type = 'extension_override'",
-        params![REPO_DEFAULT],
+        DELETE_CALL_LAYER_SQL,
+        params![REPO_DEFAULT, "extension_override"],
     )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO proc_call_graph \
-         (repo, caller_proc_key, callee_proc_name, call_type) \
-         SELECT ?, f.override_target, f.name, 'extension_override' \
-         FROM functions f \
-         WHERE f.override_type IS NOT NULL AND f.override_target IS NOT NULL \
-           AND f.override_target != '' AND f.name != ''",
-        params![REPO_DEFAULT],
-    )?;
+    conn.execute(EXTENSION_OVERRIDE_INSERT_SQL, params![REPO_DEFAULT])?;
     conn.execute("COMMIT", [])?;
     Ok(())
 }
@@ -651,13 +655,20 @@ pub(crate) fn resolve_direct_callee_keys(
     // из справочника: он и есть перечень экспортных процедур, читать заново
     // все процедуры конфигурации с текстовым условием больше не нужно.
     let t = std::time::Instant::now();
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS tmp_pcg_uexp;
-         CREATE TEMP TABLE tmp_pcg_uexp AS
-           SELECT name AS nm, MIN(path) AS path FROM exported_procs
-           GROUP BY name HAVING COUNT(*) = 1;
-         CREATE INDEX tmp_pcg_uexp_idx ON tmp_pcg_uexp(nm);",
-    )?;
+    // Карта строится только для полного пересбора: на миллионе рёбер она
+    // окупается, а пачке нужны десятки имён при справочнике в 261 тыс.
+    // процедур — построение карты по всему справочнику стоило бы секунды
+    // (замер на пачке одного модуля: 0,93 с на холодной базе; прямой запрос
+    // шага (б) — 0,001 с).
+    if scope == EdgeScope::All {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS tmp_pcg_uexp;
+             CREATE TEMP TABLE tmp_pcg_uexp AS
+               SELECT name AS nm, MIN(path) AS path FROM exported_procs
+               GROUP BY name HAVING COUNT(*) = 1;
+             CREATE INDEX tmp_pcg_uexp_idx ON tmp_pcg_uexp(nm);",
+        )?;
+    }
     tracing::debug!(
         "резолв: карта уникальных экспортов — {} мс",
         t.elapsed().as_millis()
@@ -715,19 +726,40 @@ pub(crate) fn resolve_direct_callee_keys(
     tracing::debug!("резолв: локальные адреса — {} мс", t.elapsed().as_millis());
 
     // (б) уникальный экспорт: имя callee экспортно ровно в одном месте.
+    // Полный пересбор идёт по карте tmp_pcg_uexp; пачка спрашивает справочник
+    // напрямую по индексу idx_ep_name (repo, name) — ответ тот же, без карты.
+    // Условие `ep.repo = ?1` равнозначно прежней карте без фильтра по repo:
+    // справочник всегда пишется с REPO_DEFAULT (см. `index_extras/exported.rs`).
     let t = std::time::Instant::now();
-    conn.execute(
-        &format!(
-            "UPDATE {edges} \
-             SET callee_proc_key = ( \
-                 SELECT u.path || '::' || u.nm FROM tmp_pcg_uexp u \
-                 WHERE u.nm = {edges}.callee_proc_name) \
-             WHERE repo = ?1 AND call_type = 'direct' AND callee_proc_key IS NULL \
-               AND callee_proc_name IN (SELECT nm FROM tmp_pcg_uexp){}",
-            scope.clause()
-        ),
-        params![REPO_DEFAULT],
-    )?;
+    if scope == EdgeScope::All {
+        conn.execute(
+            &format!(
+                "UPDATE {edges} \
+                 SET callee_proc_key = ( \
+                     SELECT u.path || '::' || u.nm FROM tmp_pcg_uexp u \
+                     WHERE u.nm = {edges}.callee_proc_name) \
+                 WHERE repo = ?1 AND call_type = 'direct' AND callee_proc_key IS NULL \
+                   AND callee_proc_name IN (SELECT nm FROM tmp_pcg_uexp){}",
+                scope.clause()
+            ),
+            params![REPO_DEFAULT],
+        )?;
+    } else {
+        conn.execute(
+            &format!(
+                "UPDATE {edges} \
+                 SET callee_proc_key = ( \
+                     SELECT MIN(ep.path) || '::' || ep.name FROM exported_procs ep \
+                     WHERE ep.repo = ?1 AND ep.name = {edges}.callee_proc_name \
+                     GROUP BY ep.name HAVING COUNT(*) = 1) \
+                 WHERE repo = ?1 AND call_type = 'direct' AND callee_proc_key IS NULL \
+                   AND (SELECT COUNT(*) FROM exported_procs ep \
+                        WHERE ep.repo = ?1 AND ep.name = {edges}.callee_proc_name) = 1{}",
+                scope.clause()
+            ),
+            params![REPO_DEFAULT],
+        )?;
+    }
     tracing::debug!(
         "резолв: уникальные экспорты — {} мс",
         t.elapsed().as_millis()
@@ -739,7 +771,12 @@ pub(crate) fn resolve_direct_callee_keys(
     // экспортных в ≥2 модулях. Только вызовы с ОДНОЙ точкой (общий модуль);
     // цепочки `Справочники.X.Метод` (менеджеры) — следующий шаг, остаются NULL.
     let t = std::time::Instant::now();
-    build_common_module_methods(conn)?;
+    // Карта методов общих модулей (tmp_pcg_cmeth) строится только полному
+    // пересбору; пачка берёт те же данные прямо из справочника — см.
+    // resolve_callee_keys_by_qualifier.
+    if scope == EdgeScope::All {
+        build_common_module_methods(conn)?;
+    }
     resolve_callee_keys_by_qualifier(conn, scope, edges)?;
     tracing::debug!(
         "резолв: квалифицированные общие модули — {} мс",
@@ -773,8 +810,9 @@ pub(crate) fn build_common_module_methods(conn: &rusqlite::Connection) -> Result
 
 /// Tier C: резолв `callee_proc_key` по квалификатору общего модуля. callee
 /// хранится склеенным `Модуль.Метод`; берём часть до точки как имя модуля,
-/// после — как метод, и точно адресуем в файл общего модуля. Требует заранее
-/// построенной `tmp_pcg_cmeth`. Работает только для вызовов с ОДНОЙ точкой
+/// после — как метод, и точно адресуем в файл общего модуля. При `scope = All`
+/// источник — заранее построенная `tmp_pcg_cmeth`; при `scope = Batch` — прямо
+/// из справочника `exported_procs`. Работает только для вызовов с ОДНОЙ точкой
 /// (общий модуль); цепочки `Справочники.X.Метод` пропускаются (остаются NULL).
 /// `scope` = `Batch` ограничивает рёбрами файлов пакета (точечное обновление).
 pub(crate) fn resolve_callee_keys_by_qualifier(
@@ -785,20 +823,46 @@ pub(crate) fn resolve_callee_keys_by_qualifier(
     // Замер: предварительная карта «имя → адрес» (JOIN + DISTINCT) выигрыша не
     // дала — построение карты стоит столько же, сколько коррелированный
     // подзапрос, — поэтому оставлен прямой UPDATE с EXISTS.
-    let mut sql = format!(
-        "UPDATE {edges} \
-         SET callee_proc_key = ( \
-             SELECT MIN(cm.path || '::' || cm.method) FROM tmp_pcg_cmeth cm \
-             WHERE cm.mname = substr({edges}.callee_proc_name, 1, instr({edges}.callee_proc_name,'.')-1) \
-               AND cm.method = substr({edges}.callee_proc_name, instr({edges}.callee_proc_name,'.')+1)) \
-         WHERE repo = ?1 AND call_type = 'direct' AND callee_proc_key IS NULL \
-           AND instr(callee_proc_name,'.') > 0 \
-           AND instr(substr(callee_proc_name, instr(callee_proc_name,'.')+1), '.') = 0 \
-           AND EXISTS ( \
-             SELECT 1 FROM tmp_pcg_cmeth cm \
-             WHERE cm.mname = substr({edges}.callee_proc_name, 1, instr({edges}.callee_proc_name,'.')-1) \
-               AND cm.method = substr({edges}.callee_proc_name, instr({edges}.callee_proc_name,'.')+1))",
-    );
+    //
+    // Полный пересбор читает источник из tmp_pcg_cmeth (её строит
+    // build_common_module_methods). Пачке карта не нужна: справочник
+    // exported_procs отвечает тем же индексом idx_ep_owner (repo, kind, owner,
+    // name) напрямую — иначе карта по всему справочнику строилась бы ради
+    // десятков имён пачки (замер на пачке одного модуля: 0,93 с на холодной
+    // базе против 0,001 с с прямым запросом).
+    let mut sql = if scope == EdgeScope::All {
+        format!(
+            "UPDATE {edges} \
+             SET callee_proc_key = ( \
+                 SELECT MIN(cm.path || '::' || cm.method) FROM tmp_pcg_cmeth cm \
+                 WHERE cm.mname = substr({edges}.callee_proc_name, 1, instr({edges}.callee_proc_name,'.')-1) \
+                   AND cm.method = substr({edges}.callee_proc_name, instr({edges}.callee_proc_name,'.')+1)) \
+             WHERE repo = ?1 AND call_type = 'direct' AND callee_proc_key IS NULL \
+               AND instr(callee_proc_name,'.') > 0 \
+               AND instr(substr(callee_proc_name, instr(callee_proc_name,'.')+1), '.') = 0 \
+               AND EXISTS ( \
+                 SELECT 1 FROM tmp_pcg_cmeth cm \
+                 WHERE cm.mname = substr({edges}.callee_proc_name, 1, instr({edges}.callee_proc_name,'.')-1) \
+                   AND cm.method = substr({edges}.callee_proc_name, instr({edges}.callee_proc_name,'.')+1))"
+        )
+    } else {
+        format!(
+            "UPDATE {edges} \
+             SET callee_proc_key = ( \
+                 SELECT MIN(ep.path || '::' || ep.name) FROM exported_procs ep \
+                 WHERE ep.repo = ?1 AND ep.kind = 'common' \
+                   AND ep.owner = substr({edges}.callee_proc_name, 1, instr({edges}.callee_proc_name,'.')-1) \
+                   AND ep.name = substr({edges}.callee_proc_name, instr({edges}.callee_proc_name,'.')+1)) \
+             WHERE repo = ?1 AND call_type = 'direct' AND callee_proc_key IS NULL \
+               AND instr(callee_proc_name,'.') > 0 \
+               AND instr(substr(callee_proc_name, instr(callee_proc_name,'.')+1), '.') = 0 \
+               AND EXISTS ( \
+                 SELECT 1 FROM exported_procs ep \
+                 WHERE ep.repo = ?1 AND ep.kind = 'common' \
+                   AND ep.owner = substr({edges}.callee_proc_name, 1, instr({edges}.callee_proc_name,'.')-1) \
+                   AND ep.name = substr({edges}.callee_proc_name, instr({edges}.callee_proc_name,'.')+1))"
+        )
+    };
     sql.push_str(scope.clause());
     conn.execute(&sql, params![REPO_DEFAULT])?;
     Ok(())

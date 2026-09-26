@@ -5390,6 +5390,207 @@ fn callee_key_index_is_partial() {
 }
 
 #[test]
+fn layer_delete_uses_partial_call_type_index() {
+    // DELETE слоя графа обязан нести условие `call_type <> 'direct'` буквально:
+    // без него SQLite не берёт частичный idx_pcg_call_type_nd и просматривает
+    // все рёбра графа (614 тыс. на типовой конфигурации).
+    let tmp = TempDir::new().unwrap();
+    let st = fresh_storage(&tmp);
+    let conn = st.conn();
+    conn.execute(
+        "INSERT OR IGNORE INTO proc_call_graph \
+         (repo, caller_proc_key, callee_proc_name, call_type) \
+         VALUES (?1, 'a::b', 'c', 'extension_override')",
+        params![REPO_DEFAULT],
+    )
+    .unwrap();
+
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {DELETE_CALL_LAYER_SQL}"))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map(params![REPO_DEFAULT, "extension_override"], |r| {
+            r.get("detail")
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|d| d.contains("idx_pcg_call_type_nd")),
+        "DELETE слоя не берёт частичный индекс типа ребра: {plan:?}"
+    );
+}
+
+#[test]
+fn extension_override_insert_uses_partial_functions_index() {
+    // Выборка слоя extension_override идёт по частичному idx_functions_override:
+    // без него на каждой правке модуля просматриваются все функции конфигурации
+    // (261 тыс.; замер: 1,9 с на холодной базе). Индекс заводит миграция схемы
+    // расширений при каждом открытии боевой БД (`migrate_schema` идёт перед
+    // `apply_schema_extensions`), поэтому здесь её и вызываем.
+    let tmp = TempDir::new().unwrap();
+    let st = fresh_storage(&tmp);
+    crate::schema::migrate_extensions(st.conn()).unwrap();
+    let mut stmt = st
+        .conn()
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {EXTENSION_OVERRIDE_INSERT_SQL}"
+        ))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map(params![REPO_DEFAULT], |r| r.get("detail"))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        plan.iter().any(|d| d.contains("idx_functions_override")),
+        "вставка слоя не берёт частичный индекс функций: {plan:?}"
+    );
+}
+
+#[test]
+fn batch_resolve_matches_full_resolve() {
+    // Резолв пачки не строит карты по всему справочнику экспортных процедур:
+    // адреса берутся прямыми запросами по idx_ep_name/idx_ep_owner. Проверяем,
+    // что на одинаковых данных результат совпадает с резолвом всего графа,
+    // включая честный NULL у неоднозначного имени и у несуществующего метода.
+    let p1 = "Documents/Реализация/Ext/ObjectModule.bsl";
+    let util = "CommonModules/Util/Ext/Module.bsl";
+    let mod_a = "CommonModules/A/Ext/Module.bsl";
+    let mod_b = "CommonModules/B/Ext/Module.bsl";
+    let cm = "CommonModules/Модуль/Ext/Module.bsl";
+    let caller_key = format!("{p1}::ОбработкаПроведения");
+    // Локальный вызов, уникальный экспорт, экспорт в двух модулях (NULL),
+    // квалифицированный общий модуль, несуществующий метод (NULL).
+    let callees: &[&str] = &[
+        "МестныйПомощник",
+        "ОбщийУникальный",
+        "Дубликат",
+        "Модуль.Метод",
+        "Модуль.НетТакого",
+    ];
+
+    // Одинаковые данные в обеих базах: файлы, процедуры, справочник и рёбра
+    // графа с NULL-адресом — как их кладёт пофайловая часть пачки.
+    let seed = |conn: &rusqlite::Connection| {
+        let f1 = ensure_file(conn, p1);
+        let fu = ensure_file(conn, util);
+        let fa = ensure_file(conn, mod_a);
+        let fb = ensure_file(conn, mod_b);
+        let fc = ensure_file(conn, cm);
+        set_func(conn, f1, "ОбработкаПроведения", "()");
+        set_func(conn, f1, "МестныйПомощник", "()");
+        set_func(conn, fu, "ОбщийУникальный", "() Экспорт");
+        set_func(conn, fa, "Дубликат", "() Экспорт");
+        set_func(conn, fb, "Дубликат", "() Экспорт");
+        set_func(conn, fc, "Метод", "() Экспорт");
+        rebuild_exported_procs(conn).unwrap();
+        for callee in callees {
+            conn.execute(
+                "INSERT OR IGNORE INTO proc_call_graph \
+                 (repo, caller_proc_key, callee_proc_name, call_type) \
+                 VALUES (?1, ?2, ?3, 'direct')",
+                params![REPO_DEFAULT, &caller_key, callee],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO direct_edge_files (repo, caller, callee, source_file) \
+                 VALUES (?1, 'ОбработкаПроведения', ?2, ?3)",
+                params![REPO_DEFAULT, callee, p1],
+            )
+            .unwrap();
+        }
+    };
+
+    // truth — резолв всего графа.
+    let tmp_all = TempDir::new().unwrap();
+    let st_all = fresh_storage(&tmp_all);
+    seed(st_all.conn());
+    resolve_direct_callee_keys(st_all.conn(), EdgeScope::All, "proc_call_graph").unwrap();
+
+    // batch — резолв только рёбер файла вызывателя (как в точечном обновлении).
+    let tmp_b = TempDir::new().unwrap();
+    let st_b = fresh_storage(&tmp_b);
+    seed(st_b.conn());
+    create_batch_scope(st_b.conn(), &[p1.to_string()]).unwrap();
+    resolve_direct_callee_keys(st_b.conn(), EdgeScope::Batch, "proc_call_graph").unwrap();
+
+    let keys = |st: &Storage| -> Vec<(String, String, Option<String>)> {
+        st.conn()
+            .prepare(
+                "SELECT caller_proc_key, callee_proc_name, callee_proc_key \
+                 FROM proc_call_graph WHERE repo = ?1 ORDER BY callee_proc_name",
+            )
+            .unwrap()
+            .query_map(params![REPO_DEFAULT], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        keys(&st_b),
+        keys(&st_all),
+        "адреса рёбер после резолва пачки != резолву всего графа"
+    );
+
+    // Ожидаемые адреса — через bound_to.
+    assert_eq!(
+        bound_to(
+            st_b.conn(),
+            &caller_key,
+            "МестныйПомощник",
+            &format!("{p1}::МестныйПомощник")
+        ),
+        1,
+        "локальный вызов адресуется в свой файл"
+    );
+    assert_eq!(
+        bound_to(
+            st_b.conn(),
+            &caller_key,
+            "ОбщийУникальный",
+            &format!("{util}::ОбщийУникальный")
+        ),
+        1,
+        "уникальный экспорт адресуется в единственный модуль"
+    );
+    assert_eq!(
+        bound_to(
+            st_b.conn(),
+            &caller_key,
+            "Модуль.Метод",
+            &format!("{cm}::Метод")
+        ),
+        1,
+        "квалифицированный вызов адресуется в общий модуль"
+    );
+    // Неоднозначное имя и несуществующий метод адреса не получают.
+    let key = |callee: &str| -> Option<String> {
+        st_b.conn()
+            .query_row(
+                "SELECT callee_proc_key FROM proc_call_graph \
+                 WHERE repo = ?1 AND call_type = 'direct' \
+                   AND caller_proc_key = ?2 AND callee_proc_name = ?3",
+                params![REPO_DEFAULT, &caller_key, callee],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        key("Дубликат"),
+        None,
+        "имя экспортно в двух модулях — адрес не выводится"
+    );
+    assert_eq!(
+        key("Модуль.НетТакого"),
+        None,
+        "метода в модуле нет — адрес не выводится"
+    );
+}
+
+#[test]
 fn form_owner_candidates_layouts() {
     // Конфигуратор.
     assert_eq!(
