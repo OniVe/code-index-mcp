@@ -323,6 +323,17 @@ Indexed folders come from `daemon.toml`; hook events can optionally be written t
 database (the `events_db` key). Build: `cargo build --release -p code-index-guard`; install and
 configuration — [crates/code-index-guard/README.md](crates/code-index-guard/README.md) (in Russian).
 
+### Copying a project with its ready index
+
+`code-index-copy` from the same workspace (`crates/code-index-copy`) copies the root of a git
+working tree — the files under version control with their modification times, or a `git worktree`
+on a new branch — and carries `.code-index/index.db` over via SQLite backup. On start the copy's
+daemon only reconciles files against the database and re-parses nothing. Source files outside git
+are removed from the copy's database with their cells overwritten; the copy's index configs
+(`daemon.toml` with `[[cache_targets]]`, `serve.toml`) are written with `--index-home`. The report
+is one JSON line. Build: `cargo build --release -p code-index-copy`; options and exit codes —
+[crates/code-index-copy/README.md](crates/code-index-copy/README.md) (in Russian).
+
 ## MCP Tools
 
 | Tool | Description |

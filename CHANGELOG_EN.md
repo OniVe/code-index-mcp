@@ -5,6 +5,40 @@ Russian version: [CHANGELOG.md](CHANGELOG.md).
 Format — [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning — [SemVer](https://semver.org/).
 
+## [1.8.3] — 2026-09-27
+
+**New program `code-index-copy`: a copy of a project together with its ready index. The copy's index is not rebuilt — on start the copy's daemon only reconciles files against the database.**
+
+### Added
+
+- **`code-index-copy <source> <dest>`** — a separate workspace program (`crates/code-index-copy`), no Python and no external dependencies except `git`. It copies the root of a git working tree and carries the index database over:
+  - **two copy modes**: by default — copying the files under git control, preserving modification times (working state, including uncommitted edits); `--worktree --branch <branch> [--commit <commit>]` — a `git worktree` on a new branch, project hooks are not run, line endings follow the source, and modification times are aligned with the source for files of the same size not edited relative to the commit;
+  - **database transfer** of `.code-index/index.db` via the SQLite backup API: a running daemon holds the database, so a plain file copy could be inconsistent;
+  - **cleanup of the copy's database** from files absent in the copy (source files outside git) — through the core, with freed cells overwritten (`secure_delete`), then the full-text tables are optimized;
+  - **copy index configs** (`--index-home --port --alias [--language]`): `daemon.toml` with a `[[cache_targets]]` line pointing at the copy's server and `serve.toml`. Without that line the daemon does not notify the server about reindexing, and the server keeps returning a cached old answer for up to an hour;
+  - **report** — one JSON line on stdout: mode, file counters (copied, skipped, aligned, not aligned with the reason), whether the database was transferred, how many paths were removed, the time of every step. Exit codes: 0 — done; 2 — arguments; 3 — the source is not the root of a git working tree; 4 — destination occupied; 5 — file or config copy failure; 6 — database preparation failure. On failure — `error.stage` and verbatim `error.message`, everything created by this run is rolled back (the branch — only via `git branch -d`). No database at the source is not a failure: code 0, the copy's index will be built from scratch.
+- `Storage::set_secure_delete` and `Storage::optimize_fts_tables` in the core — for cleaning the copy's database; the daemon and the server do not call them.
+
+### Compatibility
+
+- The database and response formats are unchanged, no reindex is needed. `bsl-indexer` and `code-index` behave as in 1.8.2.
+- `code-index-copy` does not start the copy's daemon and server itself — that is up to the caller.
+
+### Verification
+
+- `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings` (also for the `x86_64-unknown-linux-gnu` target), `cargo test --workspace --all-features` — 1027 tests, 0 failed; program tests: both copy modes, a file outside git does not reach the copy's database, an edited file is not aligned, a source without a database, configs, refusal on an occupied destination.
+- Live check on Windows: after the copy the copy's daemon re-parsed no file, the copy's database holds no paths outside git, an edit in the copy is visible through the server after 0.1–0.2 s.
+
+| Project | Mode | Copy with database | Copy index ready |
+|---|---|---|---|
+| project of ~600 files | copy | 1.6 s | 1.8 s |
+| project of ~600 files | worktree | 1.8 s | 1.6 s |
+| 1C dump of ~60k files, database ~3.7 GB | copy | 61 s | 4 s |
+| 1C dump of ~60k files, database ~3.7 GB | worktree | 93 s | 4 s |
+
+  For comparison: building the index of the same 1C dump copy from scratch takes 113 s. The time of a dump copy is almost entirely writing files to disk.
+- Linux node (build before publishing), the same 1C dump: copy — 44 s, worktree — 71 s; every file of the copy's database matches the disk in time and size — nothing for the copy's daemon to re-read, no paths outside git in the database. LFS files absent from the source working tree are skipped and counted in the report.
+
 ## [1.8.2] — 2026-09-27
 
 **`find_path_bsl` reports in `from_key` the procedure the found path starts from.**

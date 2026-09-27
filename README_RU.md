@@ -326,6 +326,17 @@ code-index serve --transport http --port 8011 --config /etc/code-index/daemon.to
 `cargo build --release -p code-index-guard`; установка и настройка —
 [crates/code-index-guard/README.md](crates/code-index-guard/README.md).
 
+### Копия проекта с готовым индексом
+
+`code-index-copy` из этой же рабочей области (`crates/code-index-copy`) копирует корень
+рабочего дерева git — файлы под контролем версий с сохранением времени изменения или
+`git worktree` на новой ветке — и переносит базу `.code-index/index.db` через SQLite backup.
+Демон копии при запуске только сверяет файлы с базой и ничего не разбирает заново. Файлы
+исходника вне git из базы копии удаляются с затиранием, конфиги индекса копии
+(`daemon.toml` с `[[cache_targets]]`, `serve.toml`) пишутся по ключу `--index-home`. Отчёт —
+строка JSON. Сборка: `cargo build --release -p code-index-copy`; ключи и коды выхода —
+[crates/code-index-copy/README.md](crates/code-index-copy/README.md).
+
 ## MCP-инструменты
 
 | Инструмент | Описание |
