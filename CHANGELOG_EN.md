@@ -5,6 +5,26 @@ Russian version: [CHANGELOG.md](CHANGELOG.md).
 Format — [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning — [SemVer](https://semver.org/).
 
+## [1.8.2] — 2026-09-27
+
+**`find_path_bsl` reports in `from_key` the procedure the found path starts from.**
+
+### Fixed
+
+- **`from_key` in the `find_path_bsl` response pointed at an intermediate procedure.** On a path of two or more edges it held the caller of the last edge rather than the first — both for a full `<path>::<name>` key and for a bare name, when the server tries several start keys. The path (`path`) itself was correct, only the `from_key` field was wrong; it is now the caller of the first edge.
+- **The benchmark harness `tests/perf_compare.py` could take down the working index.** Before the daemon benchmark it killed every `bsl-indexer` process by image name, including the working daemon and server, and deleted `.code-index` in the given folder even when a running daemon held it. It now stops only its own processes by PID, and before deleting `.code-index` it checks that no other process holds the database, refusing otherwise with advice to benchmark a copy.
+
+### Compatibility
+
+- The response format is unchanged, no reindex is needed.
+
+### Verification
+
+- `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` — 1017 tests, 0 failed. New test: a bare name with several start keys, `from_key` is the start of the found path; on 1.8.1 code it and the extended two-hop test fail.
+- Stock trade configuration: a two-edge path from a posting handler — `from_key` matches the start of the path for both a full key and a bare name; a call without a path answers `found: false` as before.
+- Benchmark harness: a database opened by another process is not deleted (refused with a message); a free one is detected as free.
+- Linux federation node (local build before publishing): the same path through federation — `from_key` is correct; a call without a path on a second 1C database — normal response.
+
 ## [1.8.1] — 2026-09-27
 
 **The first module edit after the daemon starts updates the call graph in 0.24 s instead of 5.5 s (cold database of a stock trade configuration, 57k files); on a working installation — 0.39 s instead of 15.5. The graph after a batch matches 1.8.0 row for row.**
