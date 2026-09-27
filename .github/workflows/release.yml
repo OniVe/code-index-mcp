@@ -117,13 +117,43 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('**/Cargo.lock') }}
 
+      # Linux: сборка под glibc 2.17 через cargo-zigbuild. Обычная сборка на
+      # ubuntu-latest требует glibc этого образа (2.39) и не запускается на
+      # Ubuntu 22.04 и других более старых системах. 2.17 — нижняя граница,
+      # которую поддерживает Rust; выходной каталог — тот же target/<target>/release.
+      - name: Install zig (Linux)
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install cargo-zigbuild (Linux)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       - name: Build release binary
         shell: bash
         run: |
+          FEATURES=""
           if [ -n "${{ matrix.features }}" ]; then
-            cargo build --release --target ${{ matrix.target }} -p ${{ matrix.crate }} --features ${{ matrix.features }}
+            FEATURES="--features ${{ matrix.features }}"
+          fi
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}.2.17 -p ${{ matrix.crate }} $FEATURES
           else
-            cargo build --release --target ${{ matrix.target }} -p ${{ matrix.crate }}
+            cargo build --release --target ${{ matrix.target }} -p ${{ matrix.crate }} $FEATURES
+          fi
+
+      - name: Check glibc requirement (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          NEED=$(objdump -T "target/${{ matrix.target }}/release/${{ matrix.artifact }}" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "${{ matrix.artifact }} требует ${NEED}"
+          if [ "$(printf '%s\nGLIBC_2.17\n' "$NEED" | sort -V | tail -1)" != "GLIBC_2.17" ]; then
+            echo "::error::${{ matrix.artifact }} требует ${NEED} — новее GLIBC_2.17"
+            exit 1
           fi
 
       - name: Package (Windows)
