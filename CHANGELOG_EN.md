@@ -5,6 +5,22 @@ Russian version: [CHANGELOG.md](CHANGELOG.md).
 Format — [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning — [SemVer](https://semver.org/).
 
+## [1.8.4] — 2026-09-27
+
+**`code-index-copy`: a file edited at the source is always re-indexed in the copy.**
+
+### Fixed
+
+- **In `--worktree` mode a file edited in the source working tree with the same size could stay in the copy's index with the source's content.** The copy gets the committed version while the database holds the source's edited content; such a file's time is not aligned, but the daemon compares times to the second. If the source edit and the copy creation fell within the same second, the copy file's time matched the one recorded in the database and the copy's daemon did not re-read it. Now the rows of such files are removed from the copy's database (with overwriting), and the daemon indexes them as new, whatever the time. Their number is a new report field `db_paths_stale`; `db_paths_removed` still counts files absent from the copy.
+
+### Compatibility
+
+- The database and response formats are unchanged. The `code-index-copy` report gains the `db_paths_stale` field.
+
+### Verification
+
+- `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` — 1027 tests, 0 failed. The `modified_same_size_is_not_aligned` test now sets the copy file's time to the source's (the worst case) and requires the indexer to re-read it; on 1.8.3 code it fails. In the 1.8.3 release CI this test failed on Linux and Windows: the test steps fit into one second.
+
 ## [1.8.3] — 2026-09-27
 
 **New program `code-index-copy`: a copy of a project together with its ready index. The copy's index is not rebuilt — on start the copy's daemon only reconciles files against the database.**
