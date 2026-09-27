@@ -901,6 +901,42 @@ async fn find_path_walks_two_hops() {
     );
     let path = res["path"].as_array().unwrap();
     assert_eq!(path.len(), 2);
+    assert_eq!(
+        res["from_key"].as_str(),
+        Some("A"),
+        "from_key — начало пути, а не промежуточный вызывающий"
+    );
+}
+
+/// Голое имя разворачивается в несколько стартовых ключей: `from_key` должен
+/// назвать тот, с которого реально начался найденный путь (регресс: отдавался
+/// вызывающий последнего ребра).
+#[tokio::test]
+async fn find_path_from_key_is_start_of_found_path() {
+    let (_tmp, storage) = fresh_storage();
+    {
+        let s = storage.get().await.unwrap();
+        s.conn()
+            .execute(
+                "INSERT INTO proc_call_graph (repo, caller_proc_key, callee_proc_name, callee_proc_key, call_type) VALUES \
+                 (?1, 'm1.bsl::Старт', 'Икс', 'm1.bsl::Икс', 'direct'), \
+                 (?1, 'm2.bsl::Старт', 'Промежуточная', 'm2.bsl::Промежуточная', 'direct'), \
+                 (?1, 'm2.bsl::Промежуточная', 'Цель', 'm3.bsl::Цель', 'direct')",
+                params![REPO],
+            )
+            .unwrap();
+    }
+    let res = run_tool(
+        &FindPathBslTool,
+        &storage,
+        serde_json::json!({"repo": REPO, "from": "Старт", "to": "Цель", "max_depth": 3}),
+    )
+    .await;
+    assert_eq!(res["found"].as_bool(), Some(true));
+    assert_eq!(res["from_key"].as_str(), Some("m2.bsl::Старт"));
+    let path = res["path"].as_array().unwrap();
+    assert_eq!(path.len(), 2);
+    assert_eq!(path[0]["caller"].as_str(), Some("m2.bsl::Старт"));
 }
 
 #[tokio::test]

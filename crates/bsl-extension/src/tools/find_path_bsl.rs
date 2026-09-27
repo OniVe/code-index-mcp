@@ -261,6 +261,11 @@ impl IndexTool for FindPathBslTool {
                             .is_some_and(|k| k.ends_with(&format!("::{}", to)));
                     if hit {
                         let mut path = Vec::new();
+                        // `from_key` — стартовый ключ, с которого пошёл путь:
+                        // вызывающий первого ребра. `node` здесь — последний
+                        // вызывающий, на пути длиннее одного ребра это
+                        // промежуточная процедура, а не начало.
+                        let mut root = node.clone();
                         let mut cur = Some(idx);
                         while let Some(i) = cur {
                             let s = &steps[i];
@@ -270,10 +275,11 @@ impl IndexTool for FindPathBslTool {
                                 "callee_key": s.callee_key,
                                 "call_type": s.call_type,
                             }));
+                            root = s.caller.clone();
                             cur = s.parent;
                         }
                         path.reverse();
-                        found = Some((node.clone(), path));
+                        found = Some((root, path));
                         break 'walk;
                     }
                     if steps.len() >= NODE_CAP {
