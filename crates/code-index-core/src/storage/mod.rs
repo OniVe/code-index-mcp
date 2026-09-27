@@ -260,6 +260,34 @@ impl Storage {
         &self.conn
     }
 
+    /// Включить затирание освобождаемых SQLite-ячеек перед очисткой копии.
+    pub fn set_secure_delete(&self, on: bool) -> Result<()> {
+        self.conn.execute_batch(if on {
+            "PRAGMA secure_delete=ON;"
+        } else {
+            "PRAGMA secure_delete=OFF;"
+        })?;
+        Ok(())
+    }
+
+    /// Слить старые сегменты каждой FTS5-таблицы, включая таблицы расширений.
+    pub fn optimize_fts_tables(&self) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%USING fts5%' COLLATE NOCASE",
+        )?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for name in &names {
+            let quoted = name.replace('"', "\"\"");
+            self.conn.execute(
+                &format!("INSERT INTO \"{quoted}\"(\"{quoted}\") VALUES ('optimize')"),
+                [],
+            )?;
+        }
+        Ok(names.len())
+    }
+
     /// Открыть БД только для чтения — не пишет в БД, не блокирует.
     /// Используется CLI-командами для параллельной работы с MCP-демоном.
     pub fn open_file_readonly(path: &Path) -> Result<Self> {

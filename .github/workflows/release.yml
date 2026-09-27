@@ -78,6 +78,26 @@ jobs:
             artifact: code-index-guard
             archive: code-index-guard-macos-arm64.tar.gz
 
+          # code-index-copy — копия проекта вместе с готовым индексом.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            crate: code-index-copy
+            features: ''
+            artifact: code-index-copy.exe
+            archive: code-index-copy-windows-x64.zip
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            crate: code-index-copy
+            features: ''
+            artifact: code-index-copy
+            archive: code-index-copy-linux-x64.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            crate: code-index-copy
+            features: ''
+            artifact: code-index-copy
+            archive: code-index-copy-macos-arm64.tar.gz
+
     runs-on: ${{ matrix.os }}
 
     steps:

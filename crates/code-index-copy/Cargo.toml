@@ -1,0 +1,25 @@
+[package]
+name = "code-index-copy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "code-index-copy"
+path = "src/main.rs"
+
+[dependencies]
+code-index-core = { path = "../code-index-core", version = "1.2.4" }
+bsl-extension = { path = "../bsl-extension", version = "1.2.4" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+rusqlite = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }

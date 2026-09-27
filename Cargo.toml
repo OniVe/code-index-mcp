@@ -7,11 +7,12 @@ members = [
     "crates/bsl-indexer",
     "crates/bsl-parse",
     "crates/code-index-guard",
+    "crates/code-index-copy",
 ]
 
 # Общие метаданные пакетов воркспейса. Каждый крейт может переопределить.
 [workspace.package]
-version = "1.8.2"
+version = "1.8.3"
 edition = "2021"
 license = "MIT"
 description = "Rust-native code index MCP server with first-class 1C:Enterprise (BSL) support. Static binary, 32 tools, tree-sitter AST for 14 languages, sub-ms search."
