@@ -4,6 +4,7 @@ use code_index_core::extension::ProcessorRegistry;
 use code_index_core::storage::Storage;
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,18 +52,32 @@ pub fn transfer(src: &Path, dest: &Path, report: &mut Report) -> Result<bool> {
     Ok(true)
 }
 
-pub fn cleanup(dest: &Path, language: Option<&str>, report: &mut Report) -> Result<()> {
+/// Удаляет из базы копии файлы, которых в копии нет, и файлы `stale` — в копии
+/// другое содержимое, чем записано в базе; демон копии проиндексирует их заново.
+pub fn cleanup(
+    dest: &Path,
+    language: Option<&str>,
+    stale: &HashSet<String>,
+    report: &mut Report,
+) -> Result<()> {
     let path = dest.join(".code-index/index.db");
     let mut storage = Storage::open_file(&path)?;
     storage.set_secure_delete(true)?;
+    let mut stale_found = 0;
     let victims: Vec<_> = storage
         .get_all_files()?
         .into_iter()
         .filter(|file| {
-            !fs::symlink_metadata(dest.join(&file.path))
-                .is_ok_and(|meta| meta.file_type().is_file())
+            let absent = !fs::symlink_metadata(dest.join(&file.path))
+                .is_ok_and(|meta| meta.file_type().is_file());
+            if !absent && stale.contains(&file.path) {
+                stale_found += 1;
+                return true;
+            }
+            absent
         })
         .collect();
+    report.db_paths_stale = stale_found;
     if !victims.is_empty() {
         storage.begin_batch()?;
         let removal = victims
@@ -76,7 +91,7 @@ pub fn cleanup(dest: &Path, language: Option<&str>, report: &mut Report) -> Resu
             storage.rollback_batch()?;
             return Err(error);
         }
-        report.db_paths_removed = victims.len();
+        report.db_paths_removed = victims.len() - stale_found;
         let mut registry = ProcessorRegistry::new();
         registry.register(Arc::new(BslLanguageProcessor::new()));
         if let Some(processor) = registry.resolve(language, dest) {

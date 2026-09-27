@@ -7,6 +7,7 @@ mod report;
 use anyhow::{bail, Context, Result};
 use clap::{error::ErrorKind, Parser};
 use report::{ErrorInfo, ExitKind, Report, Rollback};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
@@ -309,20 +310,24 @@ fn execute(cli: &Cli, report: &mut Report) -> std::result::Result<(), Failure> {
         return Err(Failure::new(ExitKind::Copy, "copy", error, true));
     }
 
+    let mut stale = HashSet::new();
     if let Some(sha) = &sha {
         let step = Instant::now();
         eprintln!("Выравнивание времени файлов");
         let result = files::align(&src, &cli.dest, sha, report);
         report.timings_ms.align = step.elapsed().as_millis();
-        if let Err(error) = result {
-            report.rollback = Some(rollback(
-                cli,
-                &src,
-                dest_existed,
-                home_existed,
-                branch_created,
-            ));
-            return Err(Failure::new(ExitKind::Database, "align", error, true));
+        match result {
+            Ok(paths) => stale = paths,
+            Err(error) => {
+                report.rollback = Some(rollback(
+                    cli,
+                    &src,
+                    dest_existed,
+                    home_existed,
+                    branch_created,
+                ));
+                return Err(Failure::new(ExitKind::Database, "align", error, true));
+            }
         }
     }
 
@@ -346,7 +351,7 @@ fn execute(cli: &Cli, report: &mut Report) -> std::result::Result<(), Failure> {
     if transferred {
         let step = Instant::now();
         eprintln!("Очистка базы копии");
-        let result = database::cleanup(&cli.dest, cli.language.as_deref(), report);
+        let result = database::cleanup(&cli.dest, cli.language.as_deref(), &stale, report);
         report.timings_ms.cleanup = step.elapsed().as_millis();
         if let Err(error) = result {
             report.rollback = Some(rollback(

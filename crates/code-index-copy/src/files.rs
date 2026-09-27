@@ -64,16 +64,21 @@ pub fn copy_index_config(src: &Path, dest: &Path) -> Result<bool> {
     }
 }
 
-pub fn align(src: &Path, dest: &Path, sha: &str, report: &mut Report) -> Result<()> {
+/// Возвращает файлы копии, которые в исходнике правлены относительно коммита:
+/// база хранит содержимое исходника, поэтому их строки из базы копии удаляются
+/// (время изменения здесь не защита — оно сравнивается с точностью до секунды).
+pub fn align(src: &Path, dest: &Path, sha: &str, report: &mut Report) -> Result<HashSet<String>> {
     let changed: HashSet<_> = git::paths(
         src,
         &["diff", "--name-only", "-z", "--no-renames", sha, "--"],
     )?
     .into_iter()
     .collect();
+    let mut stale = HashSet::new();
     for rel in git::paths(dest, &["ls-files", "-z"])? {
         if changed.contains(&rel) {
             report.not_aligned_modified += 1;
+            stale.insert(rel);
             continue;
         }
         let from = src.join(&rel);
@@ -95,5 +100,5 @@ pub fn align(src: &Path, dest: &Path, sha: &str, report: &mut Report) -> Result<
             report.mtime_aligned += 1;
         }
     }
-    Ok(())
+    Ok(stale)
 }

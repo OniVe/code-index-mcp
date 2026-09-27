@@ -200,16 +200,20 @@ fn modified_same_size_is_not_aligned() {
     let (output, report) = fixture.run(&["--worktree", "--branch", "copy-test"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(report["not_aligned_modified"].as_u64().unwrap() >= 1);
-    assert_ne!(
-        fs::metadata(fixture.src.join("sample.py"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-        fs::metadata(fixture.dest.join("sample.py"))
-            .unwrap()
-            .modified()
-            .unwrap()
-    );
+    assert_eq!(report["db_paths_stale"].as_u64(), Some(1));
+    // Худший случай: правка в исходнике и копия пришлись на одну секунду —
+    // время файла копии совпадает с записанным в базе. Файл всё равно должен
+    // перечитаться: его строки в базе копии удалены.
+    let src_mtime = fs::metadata(fixture.src.join("sample.py"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(fixture.dest.join("sample.py"))
+        .unwrap()
+        .set_modified(src_mtime)
+        .unwrap();
     let mut storage = Storage::open_file(&fixture.dest.join(".code-index/index.db")).unwrap();
     let result = Indexer::new(&mut storage)
         .full_reindex(&fixture.dest, false)
