@@ -179,10 +179,46 @@ def index_env() -> dict[str, str]:
     return env
 
 
-def run_cli(binary: Path, repo: Path, fresh: bool, timeout: float) -> dict[str, Any]:
+def index_in_use(db_dir: Path) -> bool:
+    """Держит ли базу индекса другой процесс (рабочий демон, выдача, прошлый замер)."""
+    if os.name == "nt":
+        # Windows не переименовывает каталог, в котором открыт файл.
+        probe = db_dir.with_name(db_dir.name + ".perf-probe")
+        try:
+            db_dir.rename(probe)
+        except OSError:
+            return True
+        probe.rename(db_dir)
+        return False
+    # Linux: ищем открытые дескрипторы на файлы каталога. Процессы чужих
+    # пользователей (демон в контейнере) не видны — отсюда совет про копию.
+    target = str(db_dir.resolve()) + os.sep
+    for fd_dir in Path("/proc").glob("[0-9]*/fd"):
+        try:
+            for fd in fd_dir.iterdir():
+                if os.readlink(fd).startswith(target):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def wipe_index(repo: Path) -> None:
+    """Удалить `.code-index` для замера с нуля — только если его никто не держит."""
     db = repo / ".code-index"
+    if not db.exists():
+        return
+    if index_in_use(db):
+        raise SystemExit(
+            f"refusing to wipe {db}: the index is open by another process "
+            "(a running code-index daemon?). Run the benchmark on a copy of the repository."
+        )
+    shutil.rmtree(db)
+
+
+def run_cli(binary: Path, repo: Path, fresh: bool, timeout: float) -> dict[str, Any]:
     if fresh:
-        shutil.rmtree(db, ignore_errors=True)
+        wipe_index(repo)
     started = time.monotonic()
     code, text = run_capture(
         [str(binary), "index", str(repo)], REPO_ROOT, index_env(), timeout
@@ -243,16 +279,11 @@ def daemon_readiness(
     * `search_function` — additionally gated by ``fts_build_pending``: answers
       with a result list only after the full-text index is built.
     """
-    # Kill leftovers of a previous scenario: they hold the same repository.
-    subprocess.run(
-        ["taskkill", "/F", "/IM", binary_name()],
-        capture_output=True,
-        check=False,
-    )
-    time.sleep(2)
-
+    # Процессы по имени образа не гасим: под `taskkill /IM` попадают и рабочие
+    # демон с выдачей. Свои процессы останавливает `stop_process` по PID, а
+    # остаток прошлого прогона, держащий репозиторий, поймает `wipe_index`.
+    wipe_index(repo)
     home = Path(tempfile.mkdtemp(prefix="perf-daemon-"))
-    shutil.rmtree(repo / ".code-index", ignore_errors=True)
     (home / "daemon.toml").write_text(
         "[daemon]\n"
         'http_host = "127.0.0.1"\n'
