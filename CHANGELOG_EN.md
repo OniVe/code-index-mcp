@@ -5,6 +5,22 @@ Russian version: [CHANGELOG.md](CHANGELOG.md).
 Format — [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning — [SemVer](https://semver.org/).
 
+## [1.8.5] — 2026-09-27
+
+**The release's Linux archives run on glibc 2.17 and newer — including Ubuntu 22.04.**
+
+### Fixed
+
+- **The Linux archives (`code-index`, `bsl-indexer`, `code-index-guard`, `code-index-copy`) did not start on systems older than GitHub's build image.** They were built on `ubuntu-latest` and required its glibc 2.39; on Ubuntu 22.04 (glibc 2.35) they failed with `GLIBC_2.39 not found`. The Linux archives are now built with `cargo-zigbuild` for the `x86_64-unknown-linux-gnu.2.17` target — the lowest bound Rust supports — and run on any system with glibc 2.17 or newer. After the build the release checks which glibc version every archive requires and fails if it is newer than 2.17.
+
+### Compatibility
+
+- The programs' code is unchanged, the database and response formats are the same. Windows and macOS archives are built as before.
+
+### Verification
+
+- The same build (zig 0.16.0, cargo-zigbuild, `.2.17` target) before publishing: all four programs require no newer than `GLIBC_2.17` and run on Ubuntu 22.04 (glibc 2.35); the 1.8.4 release Linux archive did not start on that system.
+
 ## [1.8.4] — 2026-09-27
 
 **`code-index-copy`: a file edited at the source is always re-indexed in the copy.**
